@@ -6,10 +6,13 @@
 #include <fcntl.h>
 
 struct sigaction FATHERHANDLER;
-struct sigaction CHILDHANDLER;
 int children[2];
+int FatherID;
 // prepare and finalize calls for initialization and destruction of anything required
 void handlerSIGINTFather(int sig){
+
+    if(getpid()==FatherID) {
+    fprintf(stderr,"handling fatehr\n");
     if(children[0])
         kill(children[0],SIGKILL);
     if(children[1])
@@ -17,23 +20,20 @@ void handlerSIGINTFather(int sig){
     children[0]=0;
     children[1]=0;
     FATHERHANDLER.sa_flags=SA_RESTART; // restart father flags;
-    CHILDHANDLER.sa_flags =SA_RESTART; // just in case
-    exit(1);
+    fprintf(stderr,"handling father\n");
+    }
+    else{
+            fprintf(stderr,"handleed\n");
+
+    }
 }
-void handlerSIGINTChild(int sig){
-    fprintf(stderr,"handleed\n");
-    return ;
-}
+
 int prepare(void)
 {
     struct sigaction father;
     father.sa_flags=SA_RESTART;
     father.sa_handler=&handlerSIGINTFather;
     FATHERHANDLER=father;
-    struct sigaction child;
-    child.sa_flags=SA_RESTART;
-    child.sa_handler=&handlerSIGINTChild;
-    CHILDHANDLER=child;
     return 0;
 }
 int finalize(void){
@@ -54,10 +54,11 @@ int ContainsPipe(char** arglist,int count){
 int process_arglist(int count, char** arglist){
     // I realize this might fail if a signal is sent while running the first few lines of 
     //      code, but sigprocmask is breaking stdin for some reason
+    
     FATHERHANDLER.sa_flags=SA_RESTART;
     FATHERHANDLER.sa_handler=&handlerSIGINTFather;
+    FatherID=getpid();
     sigaction(SIGINT,&FATHERHANDLER,NULL);
-    CHILDHANDLER.sa_flags=SA_RESTART;
     children[0]=0;
     children[1]=0;
     int fd[2];
@@ -76,16 +77,9 @@ int process_arglist(int count, char** arglist){
     if(pipeIndex){ //piping 
         //blocking SIGINT till we init the handler code taken from 
         //https://stackoverflow.com/questions/25261/set-and-oldset-in-sigprocmask
-        sigset_t mask;
-        sigemptyset(&mask);
-        sigaddset(&mask,SIGINT);
-        sigprocmask(SIG_BLOCK,&mask,NULL);
-        sigaction(SIGINT,&CHILDHANDLER,NULL);
-        sigprocmask(SIG_UNBLOCK,&mask,NULL);
         printf("running write pipe \n");
         int id2=fork();
         if(id2==0){       
-            sigaction(SIGINT,&CHILDHANDLER,NULL);
             dup2 (fd[1],STDOUT_FILENO);
             close(fd[0]);
             close(fd[1]);
@@ -97,6 +91,8 @@ int process_arglist(int count, char** arglist){
         }
        
     }
+
+    // again could cause a problem but it brakes stdin if I fix it
     children[1]=id2; // always want to be able to kill using SIGINT
     if(pipeIndex){
         printf("\npid: %d ",getpid());
@@ -108,16 +104,6 @@ int process_arglist(int count, char** arglist){
     if(id1==0){
         //blocking SIGINT till we init the handler code taken from 
         //https://stackoverflow.com/questions/25261/set-and-oldset-in-sigprocmask
-        sigset_t mask;
-        sigemptyset(&mask);
-        sigaddset(&mask,SIGINT);
-        sigprocmask(SIG_BLOCK,&mask,NULL);
-
-        raise(SIGINT);
-        fprintf(stderr,"here\n");
-
-        sigaction(SIGINT,&CHILDHANDLER,NULL);
-        sigprocmask(SIG_UNBLOCK,&mask,NULL);
         if(pipeIndex) pipeIndex++;
         //child
         if(pipeIndex) printf("read Pipe init\n");
@@ -127,6 +113,7 @@ int process_arglist(int count, char** arglist){
             close(fd[0]);
             close (fd[1]);
         } 
+        sleep(2);
         if(waitOnChild){
               arglist[count-1]=NULL;
         }
@@ -137,6 +124,7 @@ int process_arglist(int count, char** arglist){
             else fprintf(stderr,"request fild doesn't exist");
         }
     }
+    raise(SIGINT);
     if(!waitOnChild) children[0]=id1; // kill on SIGINT
     else children[0]=0; // don't kill on SIGINT
     close(fd[0]);

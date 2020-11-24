@@ -5,9 +5,21 @@
 #include <errno.h>
 #include "myBash.c"
 #include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
+void shellHandler(int sig){
+	printf("handled\n");
+	return ;
+}
 
 int main(void)
 {
+	struct sigaction sa;
+	sa.sa_flags=SA_RESTART;
+	sa.sa_handler=&shellHandler;
+	sigaction(SIGINT,&sa,NULL);
 	 if (prepare() != 0)
 	 	exit(1);
 	
