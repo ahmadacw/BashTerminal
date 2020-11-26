@@ -46,8 +46,12 @@ int process_arglist(int count, char** arglist){
     // I realize this might fail if a signal is sent while running the first few lines of 
     //      code, but sigprocmask is breaking stdin for some reason
     struct sigaction NORMALHANDLER;
+    //struct sigaction BACKGROUNDHANDLER;
     NORMALHANDLER.sa_flags=SA_RESTART;
     NORMALHANDLER.sa_handler=SIG_DFL;
+    //BACKGROUNDHANDLER.sa_flags=SA_RESTART; 
+    //BACKGROUNDHANDLER.sa_handler=SIG_IGN;
+    
     int fd[2];
     int status=-1;
     int pipeIndex=0;
@@ -55,7 +59,6 @@ int process_arglist(int count, char** arglist){
     waitOnChild=arglist[count-1]!=NULL && arglist[count-1][0]=='&' && arglist[count-1][1]=='\0';
     background=waitOnChild;
     pipeIndex=ContainsPipe(arglist,count);
-    if( pipeIndex ) printf("Piping\n");
     if(pipeIndex){
         if(pipe(fd)==-1){
             printf("Problem With Pipe\n");
@@ -77,26 +80,9 @@ int process_arglist(int count, char** arglist){
         }
        
     }
-    	
-    // again could cause a problem but it brakes stdin if I fix it
-    if(pipeIndex){
-	close(fd[0]);
-    	close(fd[1]);
-        printf("waiting on write to pipe\n");
-	while(1){
-        	if(wait(&status)==-1){
-			if (errno != ECHILD) {                           // because we changed the SIGCHILD handle
-			fprintf(stderr,"error occured in wait\n");
-			return 0;
-			}
-		}
-		break;
-	}
-        printf(" done waiting on pipe\n ");
-    } 
     int id1=fork();
     if(id1==0){ // code for either the passed function or the read side of our pipe
-	if(!waitOnChild) sigaction(SIGINT,&NORMALHANDLER,NULL);
+       // if(!waitOnChild) sigaction(SIGINT,&NORMALHANDLER,NULL);
         if(pipeIndex) pipeIndex++;
         if(pipeIndex){  //rerouting stdin
             dup2( fd[0],STDIN_FILENO);
@@ -108,11 +94,23 @@ int process_arglist(int count, char** arglist){
         }
         if( execvp(arglist[pipeIndex],arglist+pipeIndex)<0){
             if(pipeIndex)fprintf(stderr,"request file doesn't exist right side of pipe");
-            else fprintf(stderr,"request fild doesn't exist");
+            else fprintf(stderr,"request file doesn't exist");
 	    exit(1);
         }
     }
-   
+    if(pipeIndex){
+	close(fd[0]);
+    	close(fd[1]);
+	while(1){
+        	if(wait(&status)==-1){
+			if (errno != ECHILD) {// because we changed the SIGCHILD handle
+			fprintf(stderr,"error occured in wait\n");
+			return 0;
+			}
+		}
+		break;
+	}
+    } 
     if(!waitOnChild){
                 printf("Waiting on Children\n");
 		if(-1==waitpid(id1,&status,0)){
