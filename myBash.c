@@ -5,36 +5,28 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-struct sigaction FATHERHANDLER;
 int children[2];
 int FatherID;
+int background=0;
 // prepare and finalize calls for initialization and destruction of anything required
-void handlerSIGINTFather(int sig){
-
-    if(getpid()==FatherID) {
-    fprintf(stderr,"handling fatehr\n");
-    if(children[0])
-        kill(children[0],SIGKILL);
-    if(children[1])
-        kill(children[1],SIGKILL);
-    children[0]=0;
-    children[1]=0;
-    FATHERHANDLER.sa_flags=SA_RESTART; // restart father flags;
-    fprintf(stderr,"handling father\n");
-    }
-    else{
-            fprintf(stderr,"handleed\n");
-
-    }
-}
 
 int prepare(void)
 {
-    struct sigaction father;
-    father.sa_flags=SA_RESTART;
-    father.sa_handler=&handlerSIGINTFather;
-    FATHERHANDLER=father;
-    return 0;
+   	struct sigaction action1;
+	struct sigaction action2;
+	memset(&action1, 0, sizeof(action1));
+	memset(&action2, 0, sizeof(action2));
+	action1.sa_handler = SIG_IGN;
+	action1.sa_flags = SA_RESTART;
+	if (sigaction(SIGINT, &action1, NULL) != 0) { //override the default handling for SIGINT to ignoring
+		fprintf(stderr, "error occurred sigaction \n");
+	}
+	action2.sa_handler = SIG_DFL;
+	action2.sa_flags = SA_NOCLDWAIT;
+	if (sigaction(SIGCHLD, &action2, NULL) != 0) { //override the default handling for the SIGCHLD to make the background
+		fprintf(stderr, "error occurred sigaction\n ");// childrens to prevent zombies
+	}
+	return 0;
 }
 int finalize(void){
     return 0;
@@ -47,95 +39,92 @@ int ContainsPipe(char** arglist,int count){
     return 0;
 }
 
-
 // arglist - a list of char* arguments (words) provided by the user
 // it contains count+1 items, where the last item (arglist[count]) and *only* the last is NULL
 // RETURNS - 1 if should continue, 0 otherwise
 int process_arglist(int count, char** arglist){
     // I realize this might fail if a signal is sent while running the first few lines of 
     //      code, but sigprocmask is breaking stdin for some reason
-    
-    FATHERHANDLER.sa_flags=SA_RESTART;
-    FATHERHANDLER.sa_handler=&handlerSIGINTFather;
-    FatherID=getpid();
-    sigaction(SIGINT,&FATHERHANDLER,NULL);
-    children[0]=0;
-    children[1]=0;
+    struct sigaction NORMALHANDLER;
+    NORMALHANDLER.sa_flags=SA_RESTART;
+    NORMALHANDLER.sa_handler=SIG_DFL;
     int fd[2];
+    int status=-1;
     int pipeIndex=0;
     int waitOnChild=0;
     waitOnChild=arglist[count-1]!=NULL && arglist[count-1][0]=='&' && arglist[count-1][1]=='\0';
+    background=waitOnChild;
     pipeIndex=ContainsPipe(arglist,count);
     if( pipeIndex ) printf("Piping\n");
     if(pipeIndex){
         if(pipe(fd)==-1){
             printf("Problem With Pipe\n");
-            //exit(2);
         }
     }
-    int id2;
-    if(pipeIndex){ //piping 
-        //blocking SIGINT till we init the handler code taken from 
-        //https://stackoverflow.com/questions/25261/set-and-oldset-in-sigprocmask
-        printf("running write pipe \n");
-        int id2=fork();
-        if(id2==0){       
+    int id2=0;
+    if(pipeIndex){ // pipe was detected
+        id2=fork();
+        if(id2==0){// code for the write side of our pipe
+	    sigaction(SIGINT,&NORMALHANDLER,NULL);
             dup2 (fd[1],STDOUT_FILENO);
             close(fd[0]);
             close(fd[1]);
             arglist[pipeIndex]=NULL;
             if(execvp(arglist[0],arglist) <0){
                 fprintf(stderr,"request file doesn't exist in left side of pipe\n");
-                //exit(2);
+                exit(1);
             }
         }
        
     }
-
+    	
     // again could cause a problem but it brakes stdin if I fix it
-    children[1]=id2; // always want to be able to kill using SIGINT
     if(pipeIndex){
-        printf("\npid: %d ",getpid());
+	close(fd[0]);
+    	close(fd[1]);
         printf("waiting on write to pipe\n");
-        wait(&id2);
-        printf(" done waiting\n ");
+	while(1){
+        	if(wait(&status)==-1){
+			if (errno != ECHILD) {                           // because we changed the SIGCHILD handle
+			fprintf(stderr,"error occured in wait\n");
+			return 0;
+			}
+		}
+		break;
+	}
+        printf(" done waiting on pipe\n ");
     } 
     int id1=fork();
-    if(id1==0){
-        //blocking SIGINT till we init the handler code taken from 
-        //https://stackoverflow.com/questions/25261/set-and-oldset-in-sigprocmask
+    if(id1==0){ // code for either the passed function or the read side of our pipe
+	if(!waitOnChild) sigaction(SIGINT,&NORMALHANDLER,NULL);
         if(pipeIndex) pipeIndex++;
-        //child
-        if(pipeIndex) printf("read Pipe init\n");
-        else printf("child init\n");
         if(pipeIndex){  //rerouting stdin
             dup2( fd[0],STDIN_FILENO);
             close(fd[0]);
             close (fd[1]);
         } 
-        sleep(2);
-        if(waitOnChild){
+        if(waitOnChild){ // & was found and need to be deleted
               arglist[count-1]=NULL;
         }
-        if(pipeIndex) printf("read Pipe running now\n");
-        else printf("executing Child\n");
         if( execvp(arglist[pipeIndex],arglist+pipeIndex)<0){
-            if(!pipeIndex)fprintf(stderr,"request file doesn't exist right side of pipe");
+            if(pipeIndex)fprintf(stderr,"request file doesn't exist right side of pipe");
             else fprintf(stderr,"request fild doesn't exist");
+	    exit(1);
         }
     }
-    raise(SIGINT);
-    if(!waitOnChild) children[0]=id1; // kill on SIGINT
-    else children[0]=0; // don't kill on SIGINT
-    close(fd[0]);
-    close(fd[1]);
+   
     if(!waitOnChild){
                 printf("Waiting on Children\n");
-                wait(NULL);
+		if(-1==waitpid(id1,&status,0)){
+			if(errno!=ECHILD){
+					fprintf(stderr,"error occured in waitpid \n");
+					return 0;
+				}
+			}                
                 printf("Done Waiting\n");
      }
-      
-
+   
+    
     return 1;
 
 
