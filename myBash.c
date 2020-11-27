@@ -5,27 +5,36 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-int children[2];
-int FatherID;
-int background=0;
-// prepare and finalize calls for initialization and destruction of anything required
+sigset_t set;
 
 int prepare(void)
 {
-   	struct sigaction action1;
-	struct sigaction action2;
-	memset(&action1, 0, sizeof(action1));
-	memset(&action2, 0, sizeof(action2));
-	action1.sa_handler = SIG_IGN;
-	action1.sa_flags = SA_RESTART;
-	if (sigaction(SIGINT, &action1, NULL) != 0) { //override the default handling for SIGINT to ignoring
+    struct sigaction ZombieHandler;
+	ZombieHandler.sa_handler = SIG_DFL;
+	ZombieHandler.sa_flags = SA_NOCLDWAIT;
+	if (sigaction(SIGCHLD, &ZombieHandler, NULL) != 0) { //override the default handling for the SIGCHLD to stop children from becoming zombies
+        // if you are a zombie and don't say anything, you are the problem, much like covid.
+		fprintf(stderr, "error occurred sigaction\n ");
+        return 1;
+	}
+    struct sigaction ignoreHandler;
+	ignoreHandler.sa_handler = SIG_IGN;
+	ignoreHandler.sa_flags = SA_RESTART;
+	if (sigaction(SIGINT, &ignoreHandler, NULL) != 0) { //override the default handling for SIGINT to ignoring it
 		fprintf(stderr, "error occurred sigaction \n");
+                return 1;
+
 	}
-	action2.sa_handler = SIG_DFL;
-	action2.sa_flags = SA_NOCLDWAIT;
-	if (sigaction(SIGCHLD, &action2, NULL) != 0) { //override the default handling for the SIGCHLD to make the background
-		fprintf(stderr, "error occurred sigaction\n ");// childrens to prevent zombies
-	}
+    if(sigemptyset(&set)!=0){
+        fprintf(stderr,"error occured in sigemptyset\n");
+                return 1;
+
+    }
+    if(sigaddset(&set,SIGINT)!=0){
+        fprintf(stderr,"error occured in sigaddset\n");\
+                return 1;
+
+    }
 	return 0;
 }
 int finalize(void){
@@ -39,37 +48,41 @@ int ContainsPipe(char** arglist,int count){
     return 0;
 }
 
-// arglist - a list of char* arguments (words) provided by the user
-// it contains count+1 items, where the last item (arglist[count]) and *only* the last is NULL
-// RETURNS - 1 if should continue, 0 otherwise
 int process_arglist(int count, char** arglist){
-    // I realize this might fail if a signal is sent while running the first few lines of 
-    //      code, but sigprocmask is breaking stdin for some reason
-    struct sigaction NORMALHANDLER;
-    //struct sigaction BACKGROUNDHANDLER;
+    // we need a handler for the children running in the foreground, a little something for them not being shy
+    struct sigaction NORMALHANDLER; 
     NORMALHANDLER.sa_flags=SA_RESTART;
-    NORMALHANDLER.sa_handler=SIG_DFL;
-    //BACKGROUNDHANDLER.sa_flags=SA_RESTART; 
-    //BACKGROUNDHANDLER.sa_handler=SIG_IGN;
-    
+    NORMALHANDLER.sa_handler=SIG_DFL; 
     int fd[2];
     int status=-1;
     int pipeIndex=0;
     int waitOnChild=0;
+    // checking for & as the last word
     waitOnChild=arglist[count-1]!=NULL && arglist[count-1][0]=='&' && arglist[count-1][1]=='\0';
-    background=waitOnChild;
     pipeIndex=ContainsPipe(arglist,count);
     if(pipeIndex){
-        if(pipe(fd)==-1){
-            printf("Problem With Pipe\n");
+        if(pipe(fd)==-1){ // 
+            printf("likes like uncle Joe clogged the pipe again\n");
+            return 0;
         }
     }
     int id2=0;
     if(pipeIndex){ // pipe was detected
+        if(sigprocmask(SIG_BLOCK,&set,NULL)==-1){
+            fprintf(stderr,"error blocking signal write side of pipe\n");
+            return 0;
+        }
         id2=fork();
         if(id2==0){// code for the write side of our pipe
-	    sigaction(SIGINT,&NORMALHANDLER,NULL);
-            dup2 (fd[1],STDOUT_FILENO);
+	        if(sigaction(SIGINT,&NORMALHANDLER,NULL)==-1){// good child, exists on SIGINT.
+                fprintf(stderr,"error occured in sigaction: writeside of pipe\n");
+                exit(1);
+            } 
+            if(sigprocmask(SIG_UNBLOCK,&set,NULL)==-1){
+                fprintf(stderr,"error blocking signal write side of pipe\n");
+                exit(1);
+            }
+            dup2 (fd[1],STDOUT_FILENO); 
             close(fd[0]);
             close(fd[1]);
             arglist[pipeIndex]=NULL;
@@ -80,9 +93,18 @@ int process_arglist(int count, char** arglist){
         }
        
     }
+   
+    if(!pipeIndex) sigprocmask(SIG_BLOCK,&set,NULL);
     int id1=fork();
     if(id1==0){ // code for either the passed function or the read side of our pipe
-       // if(!waitOnChild) sigaction(SIGINT,&NORMALHANDLER,NULL);
+    // good child exists on SIGINT, otherwise we don't change the handler and the child acts like the parent.
+        return 1;
+        if(!waitOnChild) sigaction(SIGINT,&NORMALHANDLER,NULL); 
+        if(sigproctmask(SIG_UNBLOCK,&set,NULL)==-1){
+            fprintf(stderr,"problem occured with sigprocmask: UNBLOCK CHILD\n");
+            exit(1);
+        }
+        sleep (200);
         if(pipeIndex) pipeIndex++;
         if(pipeIndex){  //rerouting stdin
             dup2( fd[0],STDIN_FILENO);
@@ -92,14 +114,15 @@ int process_arglist(int count, char** arglist){
         if(waitOnChild){ // & was found and need to be deleted
               arglist[count-1]=NULL;
         }
-        if( execvp(arglist[pipeIndex],arglist+pipeIndex)<0){
-            if(pipeIndex)fprintf(stderr,"request file doesn't exist right side of pipe");
+        if( execvp(arglist[pipeIndex],arglist+pipeIndex)==0){
+            if(pipeIndex)fprintf(stderr,"request file doesn't exist read side of pipe");
             else fprintf(stderr,"request file doesn't exist");
-	    exit(1);
+	        exit(1);
         }
     }
+    sigprocmask(SIG_UNBLOCK,&set,NULL);
     if(pipeIndex){
-	close(fd[0]);
+	    close(fd[0]);
     	close(fd[1]);
 	while(1){
         	if(wait(&status)==-1){
@@ -121,9 +144,5 @@ int process_arglist(int count, char** arglist){
 			}                
                 printf("Done Waiting\n");
      }
-   
-    
     return 1;
-
-
 }
